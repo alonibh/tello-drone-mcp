@@ -309,7 +309,7 @@ class DroneTracker:
         )
         cv2.putText(
             frame,
-            f"Detector: {self._detector}",
+            f"Detector: {self._detector}  AREA:{(target[2]*target[3]) if target else 0}  TGT:{TARGET_AREA}",
             (10, 60),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.4,
