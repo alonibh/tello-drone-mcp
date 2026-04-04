@@ -48,47 +48,46 @@ async def connect_drone() -> str:
 
 
 @mcp.tool()
-async def execute_flight_commands(commands: list[dict]) -> str:
+async def execute_flight_commands(commands: list[str]) -> str:
     """Execute one or more drone flight commands. This is the ONLY tool for
     controlling drone movement. Use it for everything: single actions like
-    taking off, AND multi-step sequences like "take off, go up, hover, land".
+    taking off, AND multi-step sequences.
 
-    Before invoking this tool, you MUST write out the exact JSON array of
-    commands in your conversational text response so the user can verify
-    the flight plan before confirming execution.
+    CRITICAL: Before invoking this tool, state your plan in exactly one short
+    sentence starting with "Plan:" (e.g., "Plan: takeoff, up 100cm, land.")
+    so the user can verify it.
 
-    Pass a JSON list of command objects. Each object needs an "action" key.
-    Some actions also need a "value" key.
+    Each command is a simple string. Commands that need a number put it after
+    a space.
 
-    Supported actions:
-      {"action": "takeoff"}               — lift off and hover (no value needed)
-      {"action": "land"}                  — land the drone (no value needed)
-      {"action": "move_up", "value": N}   — ascend N centimeters (20–200). CRITICAL: If the user
-          specifies "cm", use that exact number. DO NOT multiply or convert it. The maximum
-          allowed value is 200.
-      {"action": "move_down", "value": N} — descend N centimeters (20–200). CRITICAL: If the user
-          specifies "cm", use that exact number. DO NOT multiply or convert it. The maximum
-          allowed value is 200.
-      {"action": "rotate", "value": N}    — rotate N degrees (-360 to 360). Positive = clockwise.
-      {"action": "hover", "value": N}     — hold position for N seconds (1–120)
+    Supported commands:
+      "takeoff"        — lift off and hover (no number)
+      "land"           — land the drone (no number)
+      "move_up N"      — ascend N centimeters (20–200). Use the user's exact number. Max 200.
+      "move_down N"    — descend N centimeters (20–200). Use the user's exact number. Max 200.
+      "rotate N"       — rotate N degrees (-360 to 360). Positive = clockwise.
+      "hover N"        — hold position for N seconds (1–120)
 
-    Single command example: [{"action": "takeoff"}]
-    Multi-step example:     [{"action": "takeoff"}, {"action": "move_up", "value": 100},
-                             {"action": "hover", "value": 5}, {"action": "land"}]
+    Example: ["takeoff", "move_up 100", "hover 5", "land"]
 
-    If any step fails, execution stops and the error is returned along with
-    which steps completed successfully.
+    If any step fails, execution stops and the error is returned.
 
     Args:
-        commands: List of command dicts with "action" and optional "value" keys.
+        commands: List of command strings like "takeoff" or "move_up 100".
     """
     if drone.state == DroneState.DISCONNECTED:
         return _DISCONNECTED_MSG
 
     results: list[str] = []
     for i, cmd in enumerate(commands, 1):
-        action = cmd.get("action")
-        value = cmd.get("value")
+        parts = cmd.strip().split()
+        action = parts[0]
+        value = None
+        if len(parts) > 1:
+            try:
+                value = int(parts[1])
+            except (ValueError, IndexError):
+                return f"Step {i} failed: could not parse number from '{cmd}'. Completed: {'; '.join(results)}"
         step = f"Step {i} ({action})"
 
         try:
@@ -111,6 +110,8 @@ async def execute_flight_commands(commands: list[dict]) -> str:
             elif action == "move_up":
                 if drone.state != DroneState.FLYING:
                     return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
+                if value is None:
+                    return f"{step} failed: move_up requires a number (e.g. 'move_up 100'). Completed: {'; '.join(results)}"
                 if value > 200:
                     return f"{step} failed: SAFETY LIMIT EXCEEDED. Value must be <= 200 cm. Completed: {'; '.join(results)}"
                 drone.move_up(value)
@@ -119,6 +120,8 @@ async def execute_flight_commands(commands: list[dict]) -> str:
             elif action == "move_down":
                 if drone.state != DroneState.FLYING:
                     return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
+                if value is None:
+                    return f"{step} failed: move_down requires a number (e.g. 'move_down 100'). Completed: {'; '.join(results)}"
                 if value > 200:
                     return f"{step} failed: SAFETY LIMIT EXCEEDED. Value must be <= 200 cm. Completed: {'; '.join(results)}"
                 drone.move_down(value)
@@ -127,6 +130,8 @@ async def execute_flight_commands(commands: list[dict]) -> str:
             elif action == "rotate":
                 if drone.state != DroneState.FLYING:
                     return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
+                if value is None:
+                    return f"{step} failed: rotate requires a number (e.g. 'rotate 90'). Completed: {'; '.join(results)}"
                 if value > 0:
                     drone.rotate_clockwise(value)
                 else:
@@ -136,6 +141,8 @@ async def execute_flight_commands(commands: list[dict]) -> str:
             elif action == "hover":
                 if drone.state != DroneState.FLYING:
                     return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
+                if value is None:
+                    return f"{step} failed: hover requires a number (e.g. 'hover 5'). Completed: {'; '.join(results)}"
                 await asyncio.sleep(value)
                 results.append(f"{step}: hovered {value} seconds.")
 
