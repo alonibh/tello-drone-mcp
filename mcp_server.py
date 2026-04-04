@@ -53,19 +53,27 @@ async def execute_flight_commands(commands: list[dict]) -> str:
     controlling drone movement. Use it for everything: single actions like
     taking off, AND multi-step sequences like "take off, go up, hover, land".
 
+    Before invoking this tool, you MUST write out the exact JSON array of
+    commands in your conversational text response so the user can verify
+    the flight plan before confirming execution.
+
     Pass a JSON list of command objects. Each object needs an "action" key.
     Some actions also need a "value" key.
 
     Supported actions:
       {"action": "takeoff"}               — lift off and hover (no value needed)
       {"action": "land"}                  — land the drone (no value needed)
-      {"action": "move_up", "value": N}   — ascend N centimeters (20–500). Convert meters to cm first!
-      {"action": "move_down", "value": N} — descend N centimeters (20–500). Convert meters to cm first!
+      {"action": "move_up", "value": N}   — ascend N centimeters (20–200). CRITICAL: If the user
+          specifies "cm", use that exact number. DO NOT multiply or convert it. The maximum
+          allowed value is 200.
+      {"action": "move_down", "value": N} — descend N centimeters (20–200). CRITICAL: If the user
+          specifies "cm", use that exact number. DO NOT multiply or convert it. The maximum
+          allowed value is 200.
       {"action": "rotate", "value": N}    — rotate N degrees (-360 to 360). Positive = clockwise.
       {"action": "hover", "value": N}     — hold position for N seconds (1–120)
 
     Single command example: [{"action": "takeoff"}]
-    Multi-step example:     [{"action": "takeoff"}, {"action": "move_up", "value": 400},
+    Multi-step example:     [{"action": "takeoff"}, {"action": "move_up", "value": 100},
                              {"action": "hover", "value": 5}, {"action": "land"}]
 
     If any step fails, execution stops and the error is returned along with
@@ -103,12 +111,16 @@ async def execute_flight_commands(commands: list[dict]) -> str:
             elif action == "move_up":
                 if drone.state != DroneState.FLYING:
                     return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
+                if value > 200:
+                    return f"{step} failed: SAFETY LIMIT EXCEEDED. Value must be <= 200 cm. Completed: {'; '.join(results)}"
                 drone.move_up(value)
                 results.append(f"{step}: moved up {value} cm.")
 
             elif action == "move_down":
                 if drone.state != DroneState.FLYING:
                     return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
+                if value > 200:
+                    return f"{step} failed: SAFETY LIMIT EXCEEDED. Value must be <= 200 cm. Completed: {'; '.join(results)}"
                 drone.move_down(value)
                 results.append(f"{step}: moved down {value} cm.")
 
