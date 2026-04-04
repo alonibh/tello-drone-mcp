@@ -9,6 +9,8 @@ import asyncio
 import base64
 import logging
 import os
+import signal
+import sys
 
 import cv2
 from mcp.server.fastmcp import FastMCP
@@ -25,6 +27,24 @@ drone = DroneManager(tello_ip=os.getenv("TELLO_IP", "192.168.10.1"))
 _DISCONNECTED_MSG = (
     "Error: drone is not connected. Call the connect_drone tool first."
 )
+_NOT_READY_MSG = (
+    "Error: drone is not ready (state={state}). Call connect_drone first."
+)
+
+
+def _shutdown_handler(signum: int, _frame: object) -> None:
+    """Handle SIGTERM/SIGINT — land the drone and exit."""
+    sig_name = signal.Signals(signum).name
+    logger.warning("Received %s — landing drone and exiting", sig_name)
+    try:
+        drone.disconnect()
+    except Exception:
+        pass
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, _shutdown_handler)
+signal.signal(signal.SIGINT, _shutdown_handler)
 
 
 @mcp.tool()
@@ -41,10 +61,9 @@ async def connect_drone() -> str:
         return f"Drone is already connected (state={drone.state.name})."
     try:
         drone.connect()
-        battery = drone.tello.get_battery()
         return (
-            f"Connected to Tello at {drone.tello.address[0]}. "
-            f"Battery: {battery}%. Video stream active."
+            f"Connected to Tello at {drone.ip}. "
+            f"Battery: {drone.battery}%. Video stream active."
         )
     except ConnectionError as e:
         return f"Connection failed: {e}"
@@ -66,9 +85,9 @@ async def execute_flight_commands(commands: list[str]) -> str:
     Supported commands:
       "takeoff"        — lift off and hover (no number)
       "land"           — land the drone (no number)
-      "move_up N"      — ascend N centimeters (20–200). Use the user's exact number. Max 200.
-      "move_down N"    — descend N centimeters (20–200). Use the user's exact number. Max 200.
-      "rotate N"       — rotate N degrees (-360 to 360). Positive = clockwise.
+      "move_up N"      — ascend N centimeters (20–200). Min 20, max 200.
+      "move_down N"    — descend N centimeters (20–200). Min 20, max 200.
+      "rotate N"       — rotate N degrees (-360 to 360). Positive = clockwise. 0 is not allowed.
       "hover N"        — hold position for N seconds (1–120)
 
     Example: ["takeoff", "move_up 100", "hover 5", "land"]
@@ -78,8 +97,11 @@ async def execute_flight_commands(commands: list[str]) -> str:
     Args:
         commands: List of command strings like "takeoff" or "move_up 100".
     """
-    if drone.state == DroneState.DISCONNECTED:
-        return _DISCONNECTED_MSG
+    current = drone.state
+    if current in (DroneState.DISCONNECTED, DroneState.ERROR, DroneState.LANDING):
+        if current == DroneState.DISCONNECTED:
+            return _DISCONNECTED_MSG
+        return _NOT_READY_MSG.format(state=current.name)
 
     results: list[str] = []
     for i, cmd in enumerate(commands, 1):
@@ -115,6 +137,8 @@ async def execute_flight_commands(commands: list[str]) -> str:
                     return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
                 if value is None:
                     return f"{step} failed: move_up requires a number (e.g. 'move_up 100'). Completed: {'; '.join(results)}"
+                if value < 20:
+                    return f"{step} failed: value must be at least 20 cm. Completed: {'; '.join(results)}"
                 if value > 200:
                     return f"{step} failed: SAFETY LIMIT EXCEEDED. Value must be <= 200 cm. Completed: {'; '.join(results)}"
                 drone.move_up(value)
@@ -125,6 +149,8 @@ async def execute_flight_commands(commands: list[str]) -> str:
                     return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
                 if value is None:
                     return f"{step} failed: move_down requires a number (e.g. 'move_down 100'). Completed: {'; '.join(results)}"
+                if value < 20:
+                    return f"{step} failed: value must be at least 20 cm. Completed: {'; '.join(results)}"
                 if value > 200:
                     return f"{step} failed: SAFETY LIMIT EXCEEDED. Value must be <= 200 cm. Completed: {'; '.join(results)}"
                 drone.move_down(value)
@@ -135,6 +161,11 @@ async def execute_flight_commands(commands: list[str]) -> str:
                     return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
                 if value is None:
                     return f"{step} failed: rotate requires a number (e.g. 'rotate 90'). Completed: {'; '.join(results)}"
+                if abs(value) > 360:
+                    return f"{step} failed: rotate value must be between -360 and 360. Completed: {'; '.join(results)}"
+                if value == 0:
+                    results.append(f"{step}: skipped, 0 degrees.")
+                    continue
                 if value > 0:
                     drone.rotate_clockwise(value)
                 else:
@@ -146,6 +177,8 @@ async def execute_flight_commands(commands: list[str]) -> str:
                     return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
                 if value is None:
                     return f"{step} failed: hover requires a number (e.g. 'hover 5'). Completed: {'; '.join(results)}"
+                if value < 1 or value > 120:
+                    return f"{step} failed: hover duration must be 1–120 seconds. Completed: {'; '.join(results)}"
                 await asyncio.sleep(value)
                 results.append(f"{step}: hovered {value} seconds.")
 
@@ -159,7 +192,7 @@ async def execute_flight_commands(commands: list[str]) -> str:
 
 
 @mcp.tool()
-async def get_latest_camera_frame() -> Image:
+async def get_latest_camera_frame() -> str | Image:
     """Capture the latest video frame from the drone's camera.
 
     Returns a PNG image that can be analyzed for navigation,

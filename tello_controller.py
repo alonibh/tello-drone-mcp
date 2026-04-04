@@ -9,8 +9,6 @@ import logging
 import threading
 import time
 from enum import Enum, auto
-from typing import Optional
-
 import numpy as np
 from djitellopy import Tello
 
@@ -40,11 +38,13 @@ class DroneManager:
         self._ip = tello_ip
         self._tello = Tello(host=tello_ip)
         self._state = DroneState.DISCONNECTED
-        self._latest_frame: Optional[np.ndarray] = None
+        self._state_lock = threading.Lock()
+        self._latest_frame: np.ndarray | None = None
         self._frame_lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._video_thread: Optional[threading.Thread] = None
-        self._battery_thread: Optional[threading.Thread] = None
+        self._video_thread: threading.Thread | None = None
+        self._battery_thread: threading.Thread | None = None
+        self._last_battery_pct: int = -1
 
     # ── Context manager ──────────────────────────────────────────
 
@@ -58,14 +58,18 @@ class DroneManager:
     # ── Lifecycle ────────────────────────────────────────────────
 
     def connect(self) -> None:
+        self._stop_background_threads()
         for attempt in range(1, RECONNECT_RETRIES + 1):
             try:
                 self._tello.connect()
-                self._state = DroneState.CONNECTED
+                with self._state_lock:
+                    self._state = DroneState.CONNECTED
                 self._start_background_threads()
-                battery = self._tello.get_battery()
+                self._last_battery_pct = self._tello.get_battery()
                 logger.info(
-                    "Connected to Tello at %s (battery %d%%)", self._ip, battery
+                    "Connected to Tello at %s (battery %d%%)",
+                    self._ip,
+                    self._last_battery_pct,
                 )
                 return
             except Exception as e:
@@ -78,7 +82,8 @@ class DroneManager:
                 if attempt < RECONNECT_RETRIES:
                     time.sleep(RECONNECT_DELAY)
 
-        self._state = DroneState.ERROR
+        with self._state_lock:
+            self._state = DroneState.ERROR
         raise ConnectionError(
             f"Could not connect to Tello at {self._ip} "
             f"after {RECONNECT_RETRIES} attempts"
@@ -86,12 +91,21 @@ class DroneManager:
 
     def disconnect(self) -> None:
         self._stop_event.set()
-        if self._state == DroneState.FLYING:
+        need_land = False
+        with self._state_lock:
+            if self._state in (DroneState.FLYING, DroneState.LANDING):
+                need_land = True
+                self._state = DroneState.LANDING
+        if need_land:
             logger.info("Auto-landing before disconnect")
             try:
                 self._tello.land()
             except Exception:
-                pass
+                try:
+                    self._tello.emergency()
+                except Exception:
+                    pass
+        self._join_background_threads()
         try:
             self._tello.streamoff()
         except Exception:
@@ -100,51 +114,96 @@ class DroneManager:
             self._tello.end()
         except Exception:
             pass
-        self._state = DroneState.DISCONNECTED
+        with self._state_lock:
+            self._state = DroneState.DISCONNECTED
         logger.info("Disconnected from Tello")
 
     # ── Flight commands ──────────────────────────────────────────
 
     def takeoff(self) -> None:
-        self._require_state(DroneState.CONNECTED)
+        with self._state_lock:
+            self._require_state(DroneState.CONNECTED)
         self._tello.takeoff()
-        self._state = DroneState.FLYING
+        with self._state_lock:
+            self._state = DroneState.FLYING
         logger.info("Takeoff complete")
 
     def land(self) -> None:
-        self._require_state(DroneState.FLYING)
-        self._state = DroneState.LANDING
-        self._tello.land()
-        self._state = DroneState.CONNECTED
+        with self._state_lock:
+            if self._state == DroneState.LANDING:
+                return
+            self._require_state(DroneState.FLYING)
+            self._state = DroneState.LANDING
+        try:
+            self._tello.land()
+        except Exception:
+            with self._state_lock:
+                self._state = DroneState.ERROR
+            raise
+        with self._state_lock:
+            self._state = DroneState.CONNECTED
         logger.info("Landing complete")
 
+    def emergency_stop(self) -> None:
+        """Cut all motors immediately."""
+        logger.critical("EMERGENCY STOP — killing motors")
+        try:
+            self._tello.emergency()
+        except Exception:
+            pass
+        with self._state_lock:
+            self._state = DroneState.ERROR
+
+    def send_rc(self, lr: int, fb: int, ud: int, yaw: int) -> None:
+        """Send RC control only if the drone is currently FLYING."""
+        with self._state_lock:
+            if self._state != DroneState.FLYING:
+                return
+        self._tello.send_rc_control(lr, fb, ud, yaw)
+
     def move_up(self, cm: int) -> None:
-        self._require_state(DroneState.FLYING)
+        with self._state_lock:
+            self._require_state(DroneState.FLYING)
         cm = max(MOVE_MIN_CM, min(MOVE_MAX_CM, cm))
         self._tello.move_up(cm)
 
     def move_down(self, cm: int) -> None:
-        self._require_state(DroneState.FLYING)
+        with self._state_lock:
+            self._require_state(DroneState.FLYING)
         cm = max(MOVE_MIN_CM, min(MOVE_MAX_CM, cm))
         self._tello.move_down(cm)
 
     def rotate_clockwise(self, degrees: int) -> None:
-        self._require_state(DroneState.FLYING)
+        with self._state_lock:
+            self._require_state(DroneState.FLYING)
         self._tello.rotate_clockwise(degrees)
 
     def rotate_counter_clockwise(self, degrees: int) -> None:
-        self._require_state(DroneState.FLYING)
+        with self._state_lock:
+            self._require_state(DroneState.FLYING)
         self._tello.rotate_counter_clockwise(degrees)
 
     # ── Frame access ─────────────────────────────────────────────
 
-    def get_latest_frame(self) -> Optional[np.ndarray]:
+    def get_latest_frame(self) -> np.ndarray | None:
         with self._frame_lock:
             if self._latest_frame is not None:
                 return self._latest_frame.copy()
             return None
 
     # ── Background threads ───────────────────────────────────────
+
+    def _stop_background_threads(self) -> None:
+        """Signal background threads to stop and wait for them."""
+        self._stop_event.set()
+        self._join_background_threads()
+
+    def _join_background_threads(self) -> None:
+        """Wait for background threads to finish (with timeout)."""
+        if self._video_thread is not None and self._video_thread.is_alive():
+            self._video_thread.join(timeout=2.0)
+        if self._battery_thread is not None and self._battery_thread.is_alive():
+            self._battery_thread.join(timeout=2.0)
 
     def _start_background_threads(self) -> None:
         self._tello.streamon()
@@ -167,7 +226,7 @@ class DroneManager:
                 frame = frame_read.frame
                 if frame is not None:
                     with self._frame_lock:
-                        self._latest_frame = frame
+                        self._latest_frame = frame.copy()
             except Exception as e:
                 logger.debug("Video frame error: %s", e)
             time.sleep(0.01)
@@ -176,17 +235,26 @@ class DroneManager:
         while not self._stop_event.is_set():
             try:
                 pct = self._tello.get_battery()
-                if pct <= BATTERY_LAND_PCT and self._state == DroneState.FLYING:
+                self._last_battery_pct = pct
+                with self._state_lock:
+                    is_flying = self._state == DroneState.FLYING
+                if pct <= BATTERY_LAND_PCT and is_flying:
                     logger.critical("Battery %d%% — emergency auto-land", pct)
                     try:
                         self.land()
-                    except Exception:
+                    except RuntimeError:
                         pass
+                    except Exception:
+                        logger.warning(
+                            "Graceful land failed in battery loop, trying emergency stop"
+                        )
+                        self.emergency_stop()
                 elif pct <= BATTERY_WARN_PCT:
                     logger.warning("Battery low: %d%%", pct)
             except Exception as e:
-                logger.debug("Battery poll error: %s", e)
+                logger.warning("Battery poll error: %s", e)
             self._stop_event.wait(BATTERY_POLL_SEC)
+        logger.info("Battery monitor thread exiting")
 
     # ── Helpers ──────────────────────────────────────────────────
 
@@ -199,7 +267,16 @@ class DroneManager:
 
     @property
     def state(self) -> DroneState:
-        return self._state
+        with self._state_lock:
+            return self._state
+
+    @property
+    def ip(self) -> str:
+        return self._ip
+
+    @property
+    def battery(self) -> int:
+        return self._last_battery_pct
 
     @property
     def tello(self) -> Tello:

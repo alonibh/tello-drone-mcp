@@ -14,10 +14,9 @@ Usage:
 import argparse
 import logging
 import os
+import signal
 import sys
 import time
-from typing import Optional
-
 import cv2
 import numpy as np
 
@@ -31,9 +30,13 @@ logger = logging.getLogger("tello.tracker")
 YAW_PID_GAINS = (0.25, 0.0, 0.10)
 ALT_PID_GAINS = (0.20, 0.0, 0.08)
 
+INTEGRAL_LIMIT = 400.0
+VIDEO_TIMEOUT_SEC = 5.0
+MAX_CONSECUTIVE_ERRORS = 30
+
 
 class PIDController:
-    """Simple time-based PID controller with output clamping."""
+    """Simple time-based PID controller with output clamping and anti-windup."""
 
     def __init__(
         self,
@@ -55,6 +58,7 @@ class PIDController:
         dt = max(now - self._prev_time, 1e-6)
 
         self._integral += error * dt
+        self._integral = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, self._integral))
         derivative = (error - self._prev_error) / dt
 
         output = self.kP * error + self.kI * self._integral + self.kD * derivative
@@ -84,16 +88,18 @@ class DroneTracker:
         self._detector = detector
         self._yaw_pid = PIDController(*YAW_PID_GAINS)
         self._alt_pid = PIDController(*ALT_PID_GAINS)
-        self._cascade: Optional[cv2.CascadeClassifier] = None
+        self._cascade: cv2.CascadeClassifier | None = None
         self._yolo = None
 
         if detector == "yolo":
             self._yolo = self._load_yolo()
-        else:
+        elif detector in ("face", "body"):
             path = FACE_CASCADE if detector == "face" else BODY_CASCADE
             self._cascade = cv2.CascadeClassifier(path)
             if self._cascade.empty():
                 raise RuntimeError(f"Failed to load cascade: {path}")
+        else:
+            raise ValueError(f"Unknown detector: {detector!r}. Use 'face', 'body', or 'yolo'.")
 
     @staticmethod
     def _load_yolo():
@@ -115,6 +121,8 @@ class DroneTracker:
                 boxes.append((x1, y1, x2 - x1, y2 - y1))
             return boxes
 
+        if self._cascade is None:
+            return []
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         rects = self._cascade.detectMultiScale(
             gray, scaleFactor=1.1, minNeighbors=5, minSize=(50, 50)
@@ -126,14 +134,14 @@ class DroneTracker:
     @staticmethod
     def _select_target(
         detections: list[tuple[int, int, int, int]],
-    ) -> Optional[tuple[int, int, int, int]]:
+    ) -> tuple[int, int, int, int] | None:
         """Pick the largest bounding box by area."""
         if not detections:
             return None
         return max(detections, key=lambda b: b[2] * b[3])
 
     @staticmethod
-    def _check_stdin() -> Optional[str]:
+    def _check_stdin() -> str | None:
         """Return a character from stdin if available, without blocking."""
         if sys.platform == "win32":
             import msvcrt
@@ -142,61 +150,105 @@ class DroneTracker:
         else:
             import select
             if select.select([sys.stdin], [], [], 0)[0]:
-                return sys.stdin.readline().strip().lower()
+                return sys.stdin.read(1).lower()
         return None
 
     def run(self) -> None:
-        """Main tracking loop. Press 'q' to quit, 'e' for emergency land."""
-        print("Tracker started. Press 'q' to quit, 'e' for emergency land.")
+        """Main tracking loop.
+
+        Keys:
+          q — quit (graceful land handled by caller)
+          e — emergency motor kill
+          l — graceful land
+        """
+        print("Tracker started. Keys: q=quit, l=land, e=EMERGENCY motor kill")
 
         fps_timer = time.time()
         fps = 0
         frame_count = 0
+        last_frame_time = time.time()
+        consecutive_errors = 0
 
         while True:
+            # ── Input handling ───────────────────────────────────
             key = cv2.waitKey(1) & 0xFF
             console = self._check_stdin()
+
             if key == ord("q") or console == "q":
                 logger.info("Quit requested")
                 break
             if key == ord("e") or console == "e":
-                logger.warning("EMERGENCY STOP")
+                logger.warning("EMERGENCY STOP — killing motors")
+                self._drone.emergency_stop()
+                break
+            if key == ord("l") or console == "l":
+                logger.info("Graceful land requested")
                 if self._drone.state == DroneState.FLYING:
                     self._drone.land()
                 break
 
+            # ── Frame acquisition ────────────────────────────────
             frame = self._drone.get_latest_frame()
             if frame is None:
+                self._drone.send_rc(0, 0, 0, 0)
+                if (
+                    self._drone.state == DroneState.FLYING
+                    and time.time() - last_frame_time > VIDEO_TIMEOUT_SEC
+                ):
+                    logger.critical(
+                        "No video frame for %.0fs — auto-landing for safety",
+                        VIDEO_TIMEOUT_SEC,
+                    )
+                    self._drone.land()
+                    break
                 time.sleep(0.033)
                 continue
 
-            h, w = frame.shape[:2]
-            cx, cy = w // 2, h // 2
+            last_frame_time = time.time()
 
-            detections = self._detect(frame)
-            target = self._select_target(detections)
-
+            # ── Detection & tracking ─────────────────────────────
             yaw_cmd = 0
             ud_cmd = 0
+            detections: list[tuple[int, int, int, int]] = []
+            target = None
+            try:
+                h, w = frame.shape[:2]
+                cx, cy = w // 2, h // 2
 
-            if target is not None:
-                tx, ty, tw, th = target
-                obj_cx = tx + tw // 2
-                obj_cy = ty + th // 2
+                detections = self._detect(frame)
+                target = self._select_target(detections)
 
-                x_err = obj_cx - cx  # positive = object is right of center
-                y_err = cy - obj_cy  # positive = object is above center -> go up
+                if target is not None:
+                    tx, ty, tw, th = target
+                    obj_cx = tx + tw // 2
+                    obj_cy = ty + th // 2
 
-                yaw_cmd = int(self._yaw_pid.compute(x_err))
-                ud_cmd = int(self._alt_pid.compute(y_err))
-            else:
-                self._yaw_pid.reset()
-                self._alt_pid.reset()
+                    x_err = obj_cx - cx
+                    y_err = cy - obj_cy
 
-            if self._drone.state == DroneState.FLYING:
-                self._drone.tello.send_rc_control(0, 0, ud_cmd, yaw_cmd)
+                    yaw_cmd = int(self._yaw_pid.compute(x_err))
+                    ud_cmd = int(self._alt_pid.compute(y_err))
+                else:
+                    self._yaw_pid.reset()
+                    self._alt_pid.reset()
 
-            # FPS counter
+                self._drone.send_rc(0, 0, ud_cmd, yaw_cmd)
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error("Tracking error (%d/%d): %s",
+                             consecutive_errors, MAX_CONSECUTIVE_ERRORS, e)
+                self._drone.send_rc(0, 0, 0, 0)
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    logger.critical(
+                        "Too many consecutive errors — auto-landing for safety"
+                    )
+                    if self._drone.state == DroneState.FLYING:
+                        self._drone.land()
+                    break
+                continue
+
+            # ── FPS counter ──────────────────────────────────────
             frame_count += 1
             if time.time() - fps_timer >= 1.0:
                 fps = frame_count
@@ -207,15 +259,14 @@ class DroneTracker:
             cv2.imshow("Tello Tracker", frame)
 
         # Stop all RC movement and close window
-        if self._drone.state == DroneState.FLYING:
-            self._drone.tello.send_rc_control(0, 0, 0, 0)
+        self._drone.send_rc(0, 0, 0, 0)
         cv2.destroyAllWindows()
 
     def _draw_debug(
         self,
         frame: np.ndarray,
         detections: list[tuple[int, int, int, int]],
-        target: Optional[tuple[int, int, int, int]],
+        target: tuple[int, int, int, int] | None,
         cx: int,
         cy: int,
         yaw: int,
@@ -223,11 +274,7 @@ class DroneTracker:
         fps: int,
     ) -> None:
         """Draw bounding boxes, crosshairs, and HUD overlay."""
-        battery = 0
-        try:
-            battery = self._drone.tello.get_battery()
-        except Exception:
-            pass
+        battery = self._drone.battery
 
         # All detections in grey
         for x, y, w, h in detections:
@@ -274,7 +321,7 @@ class DroneTracker:
         )
         cv2.putText(
             frame,
-            "Q=quit  E=emergency land",
+            "Q=quit  L=land  E=EMERGENCY",
             (10, frame.shape[0] - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.4,
@@ -284,6 +331,24 @@ class DroneTracker:
 
 
 # ── Entry point ──────────────────────────────────────────────────
+
+# Module-level reference so signal handlers can reach the drone.
+_active_drone: DroneManager | None = None
+
+
+def _shutdown_handler(signum: int, _frame: object) -> None:
+    """Handle SIGTERM/SIGINT — land the drone and exit."""
+    sig_name = signal.Signals(signum).name
+    logger.warning("Received %s — landing drone and exiting", sig_name)
+    if _active_drone is not None:
+        state = _active_drone.state
+        if state in (DroneState.FLYING, DroneState.LANDING):
+            try:
+                _active_drone.land()
+            except Exception:
+                _active_drone.emergency_stop()
+    sys.exit(0)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autonomous Tello visual tracker")
@@ -305,13 +370,26 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    with DroneManager(tello_ip=args.ip) as drone:
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    signal.signal(signal.SIGINT, _shutdown_handler)
+
+    drone = DroneManager(tello_ip=args.ip)
+    _active_drone = drone
+
+    with drone:
         if not args.no_fly:
             drone.takeoff()
             logger.info("Drone airborne — starting tracker")
 
-        tracker = DroneTracker(drone, detector=args.detector)
-        tracker.run()
-
-        if drone.state == DroneState.FLYING:
-            drone.land()
+        try:
+            tracker = DroneTracker(drone, detector=args.detector)
+            tracker.run()
+        except Exception as e:
+            logger.critical("Unhandled exception in tracker: %s", e)
+        finally:
+            if drone.state == DroneState.FLYING:
+                logger.info("Safety landing after tracker exit")
+                try:
+                    drone.land()
+                except Exception:
+                    drone.emergency_stop()
