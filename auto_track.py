@@ -117,6 +117,8 @@ class DroneTracker:
             results = self._yolo(frame, verbose=False)[0]
             boxes = []
             for r in results.boxes:
+                if int(r.cls[0]) != 0:  # filter to person class only
+                    continue
                 x1, y1, x2, y2 = map(int, r.xyxy[0])
                 boxes.append((x1, y1, x2 - x1, y2 - y1))
             return boxes
