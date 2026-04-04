@@ -5,6 +5,7 @@ Usage:
   uv run python mcp_server.py
 """
 
+import asyncio
 import base64
 import logging
 import os
@@ -24,6 +25,7 @@ drone = DroneManager(tello_ip=os.getenv("TELLO_IP", "192.168.10.1"))
 _DISCONNECTED_MSG = (
     "Error: drone is not connected. Call the connect_drone tool first."
 )
+_NOT_FLYING_MSG = "Error: drone must be flying to execute this command (state={state})."
 
 
 @mcp.tool()
@@ -48,7 +50,10 @@ async def connect_drone() -> str:
 
 @mcp.tool()
 async def takeoff() -> str:
-    """Command the Tello drone to take off and hover at ~1 meter."""
+    """Command the Tello drone to take off and hover at ~1 meter.
+
+    Takes absolutely no arguments. Do not pass speed, degrees, or battery.
+    """
     if drone.state == DroneState.DISCONNECTED:
         return _DISCONNECTED_MSG
     if drone.state == DroneState.FLYING:
@@ -94,7 +99,7 @@ async def rotate(degrees: int) -> str:
     if degrees == 0:
         return "No rotation needed (0 degrees)."
     if drone.state != DroneState.FLYING:
-        return f"Error: drone must be flying to rotate (state={drone.state.name})."
+        return _NOT_FLYING_MSG.format(state=drone.state.name)
     try:
         if degrees > 0:
             drone.rotate_clockwise(degrees)
@@ -104,6 +109,152 @@ async def rotate(degrees: int) -> str:
         return f"Rotated {direction} by {abs(degrees)} degrees."
     except Exception as e:
         return f"Rotate failed: {e}"
+
+
+@mcp.tool()
+async def move_up(cm: int) -> str:
+    """Move the drone upward by the specified number of centimeters.
+
+    IMPORTANT: The value must be in centimeters, not meters.
+    If the user says "go up 4 meters", you must pass cm=400.
+    Valid range: 20–500 cm.
+
+    Args:
+        cm: Distance to move up in centimeters (20–500).
+    """
+    if drone.state == DroneState.DISCONNECTED:
+        return _DISCONNECTED_MSG
+    if drone.state != DroneState.FLYING:
+        return _NOT_FLYING_MSG.format(state=drone.state.name)
+    try:
+        drone.move_up(cm)
+        return f"Moved up {cm} cm."
+    except Exception as e:
+        return f"Move up failed: {e}"
+
+
+@mcp.tool()
+async def move_down(cm: int) -> str:
+    """Move the drone downward by the specified number of centimeters.
+
+    IMPORTANT: The value must be in centimeters, not meters.
+    If the user says "go down 2 meters", you must pass cm=200.
+    Valid range: 20–500 cm.
+
+    Args:
+        cm: Distance to move down in centimeters (20–500).
+    """
+    if drone.state == DroneState.DISCONNECTED:
+        return _DISCONNECTED_MSG
+    if drone.state != DroneState.FLYING:
+        return _NOT_FLYING_MSG.format(state=drone.state.name)
+    try:
+        drone.move_down(cm)
+        return f"Moved down {cm} cm."
+    except Exception as e:
+        return f"Move down failed: {e}"
+
+
+@mcp.tool()
+async def hover(seconds: int) -> str:
+    """Hold the drone's current position for the specified number of seconds.
+
+    The drone must already be flying. This simply waits without sending
+    any movement commands, so the drone hovers in place.
+
+    Args:
+        seconds: Duration to hover in seconds (1–120).
+    """
+    if drone.state == DroneState.DISCONNECTED:
+        return _DISCONNECTED_MSG
+    if drone.state != DroneState.FLYING:
+        return _NOT_FLYING_MSG.format(state=drone.state.name)
+    if not (1 <= seconds <= 120):
+        return "Error: seconds must be between 1 and 120."
+    await asyncio.sleep(seconds)
+    return f"Hovered in place for {seconds} seconds."
+
+
+@mcp.tool()
+async def execute_flight_plan(commands: list[dict]) -> str:
+    """Execute a sequence of drone commands in a single call.
+
+    This is faster than calling tools one at a time. Pass a list of command
+    objects. Each object must have an "action" key. Some actions require a
+    "value" key.
+
+    Supported actions and their values:
+      - {"action": "takeoff"}              — take off (no value needed)
+      - {"action": "land"}                 — land (no value needed)
+      - {"action": "move_up", "value": N}  — move up N centimeters (20–500)
+      - {"action": "move_down", "value": N} — move down N centimeters (20–500)
+      - {"action": "rotate", "value": N}   — rotate N degrees (-360 to 360, positive=clockwise)
+      - {"action": "hover", "value": N}    — hover in place for N seconds (1–120)
+
+    Example: [{"action": "takeoff"}, {"action": "move_up", "value": 400},
+              {"action": "hover", "value": 5}, {"action": "land"}]
+
+    Args:
+        commands: List of command dicts with "action" and optional "value" keys.
+    """
+    if drone.state == DroneState.DISCONNECTED:
+        return _DISCONNECTED_MSG
+
+    results: list[str] = []
+    for i, cmd in enumerate(commands, 1):
+        action = cmd.get("action")
+        value = cmd.get("value")
+        step = f"Step {i} ({action})"
+
+        try:
+            if action == "takeoff":
+                if drone.state == DroneState.FLYING:
+                    results.append(f"{step}: skipped, already flying.")
+                    continue
+                drone.takeoff()
+                results.append(f"{step}: takeoff OK.")
+
+            elif action == "land":
+                if drone.state != DroneState.FLYING:
+                    results.append(f"{step}: skipped, not flying.")
+                    continue
+                drone.land()
+                results.append(f"{step}: land OK.")
+
+            elif action == "move_up":
+                if drone.state != DroneState.FLYING:
+                    return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
+                drone.move_up(value)
+                results.append(f"{step}: moved up {value} cm.")
+
+            elif action == "move_down":
+                if drone.state != DroneState.FLYING:
+                    return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
+                drone.move_down(value)
+                results.append(f"{step}: moved down {value} cm.")
+
+            elif action == "rotate":
+                if drone.state != DroneState.FLYING:
+                    return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
+                if value > 0:
+                    drone.rotate_clockwise(value)
+                else:
+                    drone.rotate_counter_clockwise(abs(value))
+                results.append(f"{step}: rotated {value} degrees.")
+
+            elif action == "hover":
+                if drone.state != DroneState.FLYING:
+                    return f"{step} failed: drone is not flying. Completed: {'; '.join(results)}"
+                await asyncio.sleep(value)
+                results.append(f"{step}: hovered {value} seconds.")
+
+            else:
+                return f"{step} failed: unknown action '{action}'. Completed: {'; '.join(results)}"
+
+        except Exception as e:
+            return f"{step} failed: {e}. Completed: {'; '.join(results)}"
+
+    return "Flight plan complete. " + "; ".join(results)
 
 
 @mcp.tool()
