@@ -29,6 +29,9 @@ logger = logging.getLogger("tello.tracker")
 
 YAW_PID_GAINS = (0.25, 0.0, 0.10)
 ALT_PID_GAINS = (0.20, 0.0, 0.08)
+FB_PID_GAINS  = (0.00008, 0.0, 0.00003)
+TARGET_AREA   = 14_400   # px²; ~120x120 bbox for a person at ~1.5m
+MAX_FB_SPEED  = 25       # cap forward/back RC at ±25
 
 INTEGRAL_LIMIT = 400.0
 VIDEO_TIMEOUT_SEC = 5.0
@@ -86,8 +89,9 @@ class DroneTracker:
     def __init__(self, drone: DroneManager, detector: str = "face") -> None:
         self._drone = drone
         self._detector = detector
-        self._yaw_pid = PIDController(*YAW_PID_GAINS)
-        self._alt_pid = PIDController(*ALT_PID_GAINS)
+        self._yaw_pid = PIDController(*YAW_PID_GAINS, output_limits=(-60, 60))
+        self._alt_pid = PIDController(*ALT_PID_GAINS, output_limits=(-60, 60))
+        self._fb_pid  = PIDController(*FB_PID_GAINS, output_limits=(-MAX_FB_SPEED, MAX_FB_SPEED))
         self._cascade: cv2.CascadeClassifier | None = None
         self._yolo = None
 
@@ -197,6 +201,7 @@ class DroneTracker:
             # ── Detection & tracking ─────────────────────────────
             yaw_cmd = 0
             ud_cmd = 0
+            fb_cmd = 0
             detections: list[tuple[int, int, int, int]] = []
             target = None
             try:
@@ -216,11 +221,14 @@ class DroneTracker:
 
                     yaw_cmd = int(self._yaw_pid.compute(x_err))
                     ud_cmd = int(self._alt_pid.compute(y_err))
+                    area_err = (tw * th) - TARGET_AREA
+                    fb_cmd = -int(self._fb_pid.compute(area_err))
                 else:
                     self._yaw_pid.reset()
                     self._alt_pid.reset()
+                    self._fb_pid.reset()
 
-                self._drone.send_rc(0, 0, ud_cmd, yaw_cmd)
+                self._drone.send_rc(0, fb_cmd, ud_cmd, yaw_cmd)
                 consecutive_errors = 0
             except Exception as e:
                 consecutive_errors += 1
@@ -243,7 +251,7 @@ class DroneTracker:
                 frame_count = 0
                 fps_timer = time.time()
 
-            self._draw_debug(frame, detections, target, cx, cy, yaw_cmd, ud_cmd, fps)
+            self._draw_debug(frame, detections, target, cx, cy, yaw_cmd, ud_cmd, fb_cmd, fps)
             cv2.imshow("Tello Tracker", frame)
 
         # Stop all RC movement and close window
@@ -259,6 +267,7 @@ class DroneTracker:
         cy: int,
         yaw: int,
         ud: int,
+        fb: int,
         fps: int,
     ) -> None:
         """Draw bounding boxes, crosshairs, and HUD overlay."""
@@ -291,7 +300,7 @@ class DroneTracker:
         )
         cv2.putText(
             frame,
-            f"YAW:{yaw:+4d} UD:{ud:+4d}",
+            f"YAW:{yaw:+4d} UD:{ud:+4d} FB:{fb:+4d}",
             (10, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
