@@ -27,11 +27,15 @@ logger = logging.getLogger("tello.tracker")
 
 # ── PID Controller ───────────────────────────────────────────────
 
-YAW_PID_GAINS = (0.25, 0.0, 0.10)
-ALT_PID_GAINS = (0.20, 0.0, 0.08)
-FB_PID_GAINS  = (0.00008, 0.0, 0.00003)
+YAW_PID_GAINS = (0.15, 0.0, 0.02)
+ALT_PID_GAINS = (0.15, 0.0, 0.02)
+FB_PID_GAINS  = (0.0004, 0.0, 0.0001)
 TARGET_AREA   = 15_400   # px²; tuned for preferred standoff distance
 MAX_FB_SPEED  = 25       # cap forward/back RC at ±25
+
+YAW_DEADZONE  = 15       # px — ignore horizontal jitter below this
+ALT_DEADZONE  = 15       # px — ignore vertical jitter below this
+AREA_DEADZONE = 2000     # px² — ignore area jitter below this
 
 INTEGRAL_LIMIT = 400.0
 VIDEO_TIMEOUT_SEC = 5.0
@@ -218,11 +222,26 @@ class DroneTracker:
 
                     x_err = obj_cx - cx
                     y_err = cy - obj_cy
+                    area_err = (tw * th) - TARGET_AREA
+
+                    # Apply deadzones — suppress PID response to small jitter
+                    if abs(x_err) < YAW_DEADZONE:
+                        x_err = 0
+                    if abs(y_err) < ALT_DEADZONE:
+                        y_err = 0
+                    if abs(area_err) < AREA_DEADZONE:
+                        area_err = 0
 
                     yaw_cmd = int(self._yaw_pid.compute(x_err))
                     ud_cmd = int(self._alt_pid.compute(y_err))
-                    area_err = (tw * th) - TARGET_AREA
                     fb_cmd = -int(self._fb_pid.compute(area_err))
+
+                    if frame_count == 0:  # log once per second
+                        logger.debug(
+                            "x_err=%+4d y_err=%+4d area=%d area_err=%+d → yaw=%+d ud=%+d fb=%+d",
+                            obj_cx - cx, cy - obj_cy, tw * th, (tw * th) - TARGET_AREA,
+                            yaw_cmd, ud_cmd, fb_cmd,
+                        )
                 else:
                     self._yaw_pid.reset()
                     self._alt_pid.reset()
@@ -365,7 +384,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Debug mode: connect and stream video without takeoff",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable detailed tracker logging (errors, area, commands)",
+    )
     args = parser.parse_args()
+
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
 
     signal.signal(signal.SIGTERM, _shutdown_handler)
     signal.signal(signal.SIGINT, _shutdown_handler)
