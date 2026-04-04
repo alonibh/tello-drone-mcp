@@ -29,7 +29,10 @@ _DISCONNECTED_MSG = (
 
 @mcp.tool()
 async def connect_drone() -> str:
-    """Establish the UDP connection to the Tello drone and start video/battery threads.
+    """CRITICAL: This tool takes absolutely NO arguments. Do not pass a commands
+    list or any other parameters to it.
+
+    Establish the UDP connection to the Tello drone and start video/battery threads.
 
     This must be called before any other drone tool. The drone should be powered
     on and your computer connected to its Wi-Fi network (default IP 192.168.10.1).
