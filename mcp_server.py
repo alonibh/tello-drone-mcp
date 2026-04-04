@@ -107,7 +107,7 @@ async def rotate(degrees: int) -> str:
 
 
 @mcp.tool()
-async def get_latest_camera_frame() -> Image | str:
+async def get_latest_camera_frame() -> Image:
     """Capture the latest video frame from the drone's camera.
 
     Returns a PNG image that can be analyzed for navigation,
