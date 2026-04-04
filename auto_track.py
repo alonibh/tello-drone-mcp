@@ -142,19 +142,6 @@ class DroneTracker:
             return None
         return max(detections, key=lambda b: b[2] * b[3])
 
-    @staticmethod
-    def _check_stdin() -> str | None:
-        """Return a character from stdin if available, without blocking."""
-        if sys.platform == "win32":
-            import msvcrt
-            if msvcrt.kbhit():
-                return msvcrt.getwch().lower()
-        else:
-            import select
-            if select.select([sys.stdin], [], [], 0)[0]:
-                return sys.stdin.read(1).lower()
-        return None
-
     def run(self) -> None:
         """Main tracking loop.
 
@@ -174,16 +161,15 @@ class DroneTracker:
         while True:
             # ── Input handling ───────────────────────────────────
             key = cv2.waitKey(1) & 0xFF
-            console = self._check_stdin()
 
-            if key == ord("q") or console == "q":
+            if key == ord("q"):
                 logger.info("Quit requested")
                 break
-            if key == ord("e") or console == "e":
+            if key == ord("e"):
                 logger.warning("EMERGENCY STOP — killing motors")
                 self._drone.emergency_stop()
                 break
-            if key == ord("l") or console == "l":
+            if key == ord("l"):
                 logger.info("Graceful land requested")
                 if self._drone.state == DroneState.FLYING:
                     self._drone.land()
