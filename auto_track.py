@@ -30,7 +30,7 @@ logger = logging.getLogger("tello.tracker")
 YAW_PID_GAINS = (0.25, 0.0, 0.10)
 ALT_PID_GAINS = (0.20, 0.0, 0.08)
 FB_PID_GAINS  = (0.00008, 0.0, 0.00003)
-TARGET_AREA   = 14_400   # px²; ~120x120 bbox for a person at ~1.5m
+TARGET_AREA   = 15_400   # px²; tuned for preferred standoff distance
 MAX_FB_SPEED  = 25       # cap forward/back RC at ±25
 
 INTEGRAL_LIMIT = 400.0
