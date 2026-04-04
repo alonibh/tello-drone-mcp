@@ -1,0 +1,11 @@
+[project]
+name = "tello-drone-mcp"
+version = "0.1.0"
+description = "Autonomous DJI Tello drone controller with MCP server"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "djitellopy>=2.5.0",
+    "opencv-python>=4.8.0",
+    "mcp[cli]>=1.12.2",
+]
