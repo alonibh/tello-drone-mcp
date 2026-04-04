@@ -14,7 +14,6 @@ Usage:
 import argparse
 import logging
 import os
-import select
 import sys
 import time
 from typing import Optional
@@ -136,8 +135,14 @@ class DroneTracker:
     @staticmethod
     def _check_stdin() -> Optional[str]:
         """Return a character from stdin if available, without blocking."""
-        if select.select([sys.stdin], [], [], 0)[0]:
-            return sys.stdin.readline().strip().lower()
+        if sys.platform == "win32":
+            import msvcrt
+            if msvcrt.kbhit():
+                return msvcrt.getwch().lower()
+        else:
+            import select
+            if select.select([sys.stdin], [], [], 0)[0]:
+                return sys.stdin.readline().strip().lower()
         return None
 
     def run(self) -> None:
