@@ -14,6 +14,8 @@ Usage:
 import argparse
 import logging
 import os
+import select
+import sys
 import time
 from typing import Optional
 
@@ -131,6 +133,13 @@ class DroneTracker:
             return None
         return max(detections, key=lambda b: b[2] * b[3])
 
+    @staticmethod
+    def _check_stdin() -> Optional[str]:
+        """Return a character from stdin if available, without blocking."""
+        if select.select([sys.stdin], [], [], 0)[0]:
+            return sys.stdin.readline().strip().lower()
+        return None
+
     def run(self) -> None:
         """Main tracking loop. Press 'q' to quit, 'e' for emergency land."""
         print("Tracker started. Press 'q' to quit, 'e' for emergency land.")
@@ -141,10 +150,11 @@ class DroneTracker:
 
         while True:
             key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
+            console = self._check_stdin()
+            if key == ord("q") or console == "q":
                 logger.info("Quit requested")
                 break
-            if key == ord("e"):
+            if key == ord("e") or console == "e":
                 logger.warning("EMERGENCY STOP")
                 if self._drone.state == DroneState.FLYING:
                     self._drone.land()
