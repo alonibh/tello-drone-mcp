@@ -1,14 +1,14 @@
 """
 auto_track.py — Autonomous visual tracking for the DJI Tello.
 
-Uses Haar Cascade (or optional YOLOv8) to detect a target in the drone's
-video feed and a PID controller to keep the target centered via continuous
-yaw and altitude adjustments.
+Uses YOLOv8 (OpenVINO backend) to detect a person in the drone's video feed
+and a PID controller to keep the target centered via continuous yaw, altitude,
+and forward/backward adjustments.
 
 Usage:
-  uv run python auto_track.py --detector face
-  uv run python auto_track.py --detector body --no-fly   # debug without takeoff
-  uv run python auto_track.py --detector yolo             # requires: uv add ultralytics
+  uv run python auto_track.py
+  uv run python auto_track.py --no-fly   # debug without takeoff
+  uv run python auto_track.py --debug    # enable detailed tracking logs
 """
 
 import argparse
@@ -86,66 +86,36 @@ class PIDController:
 
 # ── Drone Tracker ────────────────────────────────────────────────
 
-FACE_CASCADE = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-BODY_CASCADE = cv2.data.haarcascades + "haarcascade_fullbody.xml"
-
-
 class DroneTracker:
     """Autonomous visual tracker that keeps a detected target centered."""
 
-    def __init__(self, drone: DroneManager, detector: str = "face") -> None:
+    def __init__(self, drone: DroneManager) -> None:
         self._drone = drone
-        self._detector = detector
         self._yaw_pid = PIDController(*YAW_PID_GAINS, output_limits=(-60, 60))
         self._alt_pid = PIDController(*ALT_PID_GAINS, output_limits=(-60, 60))
         self._fb_pid  = PIDController(*FB_PID_GAINS, output_limits=(-MAX_FB_SPEED, MAX_FB_SPEED))
         self._video_writer: cv2.VideoWriter | None = None
         self._recording = False
         self._rec_path: str = ""
-        self._cascade: cv2.CascadeClassifier | None = None
-        self._yolo = None
-
-        if detector == "yolo":
-            self._yolo = self._load_yolo()
-        elif detector in ("face", "body"):
-            path = FACE_CASCADE if detector == "face" else BODY_CASCADE
-            self._cascade = cv2.CascadeClassifier(path)
-            if self._cascade.empty():
-                raise RuntimeError(f"Failed to load cascade: {path}")
-        else:
-            raise ValueError(f"Unknown detector: {detector!r}. Use 'face', 'body', or 'yolo'.")
+        self._yolo = self._load_yolo()
 
     @staticmethod
     def _load_yolo():
-        try:
-            from ultralytics import YOLO
-        except ImportError:
-            raise ImportError(
-                "YOLOv8 requires ultralytics. Install with: uv add ultralytics"
-            )
-        return YOLO("yolov8n.pt")
+        from ultralytics import YOLO
+        model = YOLO("yolov8n.pt")
+        model.export(format="openvino")
+        return YOLO("yolov8n_openvino_model/")
 
     def _detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Return list of (x, y, w, h) bounding boxes."""
-        if self._detector == "yolo" and self._yolo is not None:
-            results = self._yolo(frame, verbose=False)[0]
-            boxes = []
-            for r in results.boxes:
-                if int(r.cls[0]) != 0:  # filter to person class only
-                    continue
-                x1, y1, x2, y2 = map(int, r.xyxy[0])
-                boxes.append((x1, y1, x2 - x1, y2 - y1))
-            return boxes
-
-        if self._cascade is None:
-            return []
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        rects = self._cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(50, 50)
-        )
-        if len(rects) == 0:
-            return []
-        return [(int(x), int(y), int(w), int(h)) for x, y, w, h in rects]
+        results = self._yolo(frame, verbose=False, imgsz=480)[0]
+        boxes = []
+        for r in results.boxes:
+            if int(r.cls[0]) != 0:  # filter to person class only
+                continue
+            x1, y1, x2, y2 = map(int, r.xyxy[0])
+            boxes.append((x1, y1, x2 - x1, y2 - y1))
+        return boxes
 
     @staticmethod
     def _select_target(
@@ -372,7 +342,7 @@ class DroneTracker:
         )
         cv2.putText(
             frame,
-            f"Detector: {self._detector}  AREA:{(target[2]*target[3]) if target else 0}  TGT:{TARGET_AREA}",
+            f"AREA:{(target[2]*target[3]) if target else 0}  TGT:{TARGET_AREA}",
             (10, 60),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.4,
@@ -423,12 +393,6 @@ if __name__ == "__main__":
         help="Tello IP address (default: $TELLO_IP or 192.168.10.1)",
     )
     parser.add_argument(
-        "--detector",
-        default="face",
-        choices=["face", "body", "yolo"],
-        help="Detection backend (default: face)",
-    )
-    parser.add_argument(
         "--no-fly",
         action="store_true",
         help="Debug mode: connect and stream video without takeoff",
@@ -450,12 +414,15 @@ if __name__ == "__main__":
     _active_drone = drone
 
     with drone:
+        logger.info("Loading YOLO model (OpenVINO)...")
+        tracker = DroneTracker(drone)
+        logger.info("Model loaded — ready")
+
         if not args.no_fly:
             drone.takeoff()
             logger.info("Drone airborne — starting tracker")
 
         try:
-            tracker = DroneTracker(drone, detector=args.detector)
             tracker.run()
         except Exception as e:
             logger.critical("Unhandled exception in tracker: %s", e)
