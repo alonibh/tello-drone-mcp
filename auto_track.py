@@ -156,17 +156,18 @@ class DroneTracker:
             return None
         return max(detections, key=lambda b: b[2] * b[3])
 
-    def _toggle_recording(self) -> None:
+    def _toggle_recording(self, fps: float) -> None:
         if self._recording:
             self._stop_recording()
         else:
+            rec_fps = max(fps, 5.0)  # use actual FPS, floor at 5 to avoid broken files
             self._rec_path = os.path.join(
                 OUTPUT_DIR, f"rec_{datetime.now():%Y%m%d_%H%M%S}.mp4"
             )
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, 30.0, (960, 720))
+            self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, rec_fps, (960, 720))
             self._recording = True
-            logger.info("Recording started: %s", self._rec_path)
+            logger.info("Recording started at %.0f FPS: %s", rec_fps, self._rec_path)
 
     def _stop_recording(self) -> None:
         if self._recording and self._video_writer is not None:
@@ -212,7 +213,7 @@ class DroneTracker:
             if key == ord("s"):
                 take_screenshot = True
             if key == ord("r"):
-                self._toggle_recording()
+                self._toggle_recording(fps)
 
             # ── Frame acquisition ────────────────────────────────
             frame = self._drone.get_latest_frame()
