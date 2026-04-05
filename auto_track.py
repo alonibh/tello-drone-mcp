@@ -17,6 +17,7 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime
 import cv2
 import numpy as np
 
@@ -36,6 +37,8 @@ MAX_FB_SPEED  = 25       # cap forward/back RC at ±25
 YAW_DEADZONE  = 15       # px — ignore horizontal jitter below this
 ALT_DEADZONE  = 15       # px — ignore vertical jitter below this
 AREA_DEADZONE = 2000     # px² — ignore area jitter below this
+
+OUTPUT_DIR = "recordings"
 
 INTEGRAL_LIMIT = 400.0
 VIDEO_TIMEOUT_SEC = 5.0
@@ -96,6 +99,9 @@ class DroneTracker:
         self._yaw_pid = PIDController(*YAW_PID_GAINS, output_limits=(-60, 60))
         self._alt_pid = PIDController(*ALT_PID_GAINS, output_limits=(-60, 60))
         self._fb_pid  = PIDController(*FB_PID_GAINS, output_limits=(-MAX_FB_SPEED, MAX_FB_SPEED))
+        self._video_writer: cv2.VideoWriter | None = None
+        self._recording = False
+        self._rec_path: str = ""
         self._cascade: cv2.CascadeClassifier | None = None
         self._yolo = None
 
@@ -150,6 +156,25 @@ class DroneTracker:
             return None
         return max(detections, key=lambda b: b[2] * b[3])
 
+    def _toggle_recording(self) -> None:
+        if self._recording:
+            self._stop_recording()
+        else:
+            self._rec_path = os.path.join(
+                OUTPUT_DIR, f"rec_{datetime.now():%Y%m%d_%H%M%S}.mp4"
+            )
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, 30.0, (960, 720))
+            self._recording = True
+            logger.info("Recording started: %s", self._rec_path)
+
+    def _stop_recording(self) -> None:
+        if self._recording and self._video_writer is not None:
+            self._video_writer.release()
+            self._video_writer = None
+            self._recording = False
+            logger.info("Recording saved: %s", self._rec_path)
+
     def run(self) -> None:
         """Main tracking loop.
 
@@ -158,13 +183,15 @@ class DroneTracker:
           e — emergency motor kill
           l — graceful land
         """
-        print("Tracker started. Keys: q=quit, l=land, e=EMERGENCY motor kill")
+        print("Tracker started. Keys: q=quit, l=land, e=EMERGENCY, r=record, s=screenshot")
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
 
         fps_timer = time.time()
         fps = 0
         frame_count = 0
         last_frame_time = time.time()
         consecutive_errors = 0
+        take_screenshot = False
 
         while True:
             # ── Input handling ───────────────────────────────────
@@ -182,6 +209,10 @@ class DroneTracker:
                 if self._drone.state == DroneState.FLYING:
                     self._drone.land()
                 break
+            if key == ord("s"):
+                take_screenshot = True
+            if key == ord("r"):
+                self._toggle_recording()
 
             # ── Frame acquisition ────────────────────────────────
             frame = self._drone.get_latest_frame()
@@ -273,7 +304,17 @@ class DroneTracker:
             self._draw_debug(frame, detections, target, cx, cy, yaw_cmd, ud_cmd, fb_cmd, fps)
             cv2.imshow("Tello Tracker", frame)
 
-        # Stop all RC movement and close window
+            if take_screenshot:
+                path = os.path.join(OUTPUT_DIR, f"shot_{datetime.now():%Y%m%d_%H%M%S}.png")
+                cv2.imwrite(path, frame)
+                logger.info("Screenshot saved: %s", path)
+                take_screenshot = False
+
+            if self._recording and self._video_writer is not None:
+                self._video_writer.write(frame)
+
+        # Stop all RC movement and release resources
+        self._stop_recording()
         self._drone.send_rc(0, 0, 0, 0)
         cv2.destroyAllWindows()
 
@@ -335,9 +376,14 @@ class DroneTracker:
             (200, 200, 0),
             1,
         )
+        if self._recording:
+            cv2.putText(
+                frame, "[REC]", (frame.shape[1] - 70, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2,
+            )
         cv2.putText(
             frame,
-            "Q=quit  L=land  E=EMERGENCY",
+            "Q=quit L=land E=EMERG R=rec S=shot",
             (10, frame.shape[0] - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.4,
