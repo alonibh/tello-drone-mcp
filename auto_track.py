@@ -103,8 +103,8 @@ class DroneTracker:
     def _load_yolo():
         from ultralytics import YOLO
         model = YOLO("yolov8n.pt")
-        model.export(format="openvino")
-        return YOLO("yolov8n_openvino_model/")
+        model.export(format="openvino", imgsz=480)
+        return YOLO("yolov8n_openvino_model/", task="detect")
 
     def _detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Return list of (x, y, w, h) bounding boxes."""
