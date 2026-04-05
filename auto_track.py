@@ -136,13 +136,9 @@ class DroneTracker:
             fourcc = cv2.VideoWriter_fourcc(*"avc1")
             self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, rec_fps, (960, 720))
             if not self._video_writer.isOpened():
-                logger.info(
-                    "H.264 encoder (avc1) failed to open — on Windows, ensure "
-                    "openh264-*.dll is in PATH or the working directory. "
-                    "Download from: https://github.com/cisco/openh264/releases"
-                )
-                self._video_writer = None
-                return
+                logger.info("H.264 (avc1) unavailable — falling back to mp4v")
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, rec_fps, (960, 720))
             self._recording = True
             logger.info("Recording started at %.0f FPS: %s", rec_fps, self._rec_path)
 
