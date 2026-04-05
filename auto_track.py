@@ -232,6 +232,8 @@ class DroneTracker:
                 time.sleep(0.033)
                 continue
 
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            
             last_frame_time = time.time()
 
             # ── Detection & tracking ─────────────────────────────
