@@ -14,6 +14,7 @@ Usage:
 import argparse
 import logging
 import os
+os.environ["OPENH264_LIBRARY"] = "NUL"
 import signal
 import sys
 import time
