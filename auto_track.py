@@ -1,7 +1,7 @@
 """
 auto_track.py — Autonomous visual tracking for the DJI Tello.
 
-Uses YOLOv8 (OpenVINO backend) to detect a person in the drone's video feed
+Uses YOLOv8 to detect a person in the drone's video feed
 and a PID controller to keep the target centered via continuous yaw, altitude,
 and forward/backward adjustments.
 
@@ -102,13 +102,11 @@ class DroneTracker:
     @staticmethod
     def _load_yolo():
         from ultralytics import YOLO
-        model = YOLO("yolov8n.pt")
-        model.export(format="openvino")
-        return YOLO("yolov8n_openvino_model/", task="detect")
+        return YOLO("yolov8n.pt")
 
     def _detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Return list of (x, y, w, h) bounding boxes."""
-        results = self._yolo(frame, verbose=False, imgsz=640)[0]
+        results = self._yolo(frame, verbose=False)[0]
         boxes = []
         for r in results.boxes:
             if int(r.cls[0]) != 0:  # filter to person class only
@@ -414,7 +412,7 @@ if __name__ == "__main__":
     _active_drone = drone
 
     with drone:
-        logger.info("Loading YOLO model (OpenVINO)...")
+        logger.info("Loading YOLO model...")
         tracker = DroneTracker(drone)
         logger.info("Model loaded — ready")
 
