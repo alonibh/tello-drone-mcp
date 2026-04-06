@@ -14,7 +14,6 @@ Usage:
 import argparse
 import logging
 import os
-os.environ["OPENH264_LIBRARY"] = "NUL"
 import signal
 import sys
 import time
@@ -150,13 +149,8 @@ class DroneTracker:
             self._rec_path = os.path.join(
                 OUTPUT_DIR, f"rec_{datetime.now():%Y%m%d_%H%M%S}.mp4"
             )
-            # avc1 = H.264 codec, compatible with WhatsApp and mobile devices
-            fourcc = cv2.VideoWriter_fourcc(*"avc1")
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, rec_fps, (960, 720))
-            if not self._video_writer.isOpened():
-                logger.info("H.264 (avc1) unavailable — falling back to mp4v")
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, rec_fps, (960, 720))
             self._recording = True
             logger.info("Recording started at %.0f FPS: %s", rec_fps, self._rec_path)
 
