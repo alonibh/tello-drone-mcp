@@ -98,6 +98,7 @@ class DroneTracker:
         self._video_writer: cv2.VideoWriter | None = None
         self._recording = False
         self._rec_path: str = ""
+        self._last_target_center: tuple[int, int] | None = None
         self._yolo = self._load_yolo()
 
     @staticmethod
@@ -116,14 +117,24 @@ class DroneTracker:
             boxes.append((x1, y1, x2 - x1, y2 - y1))
         return boxes
 
-    @staticmethod
     def _select_target(
+        self,
         detections: list[tuple[int, int, int, int]],
     ) -> tuple[int, int, int, int] | None:
-        """Pick the largest bounding box by area."""
+        """Spatial proximity target lock — stay on the same person across frames."""
         if not detections:
             return None
-        return max(detections, key=lambda b: b[2] * b[3])
+
+        if self._last_target_center is None:
+            # First lock — pick the largest person
+            target = max(detections, key=lambda b: b[2] * b[3])
+        else:
+            # Pick the detection closest to the last known target position
+            lx, ly = self._last_target_center
+            target = min(detections, key=lambda b: (b[0] + b[2] // 2 - lx) ** 2 + (b[1] + b[3] // 2 - ly) ** 2)
+
+        self._last_target_center = (target[0] + target[2] // 2, target[1] + target[3] // 2)
+        return target
 
     def _toggle_recording(self, fps: float) -> None:
         if self._recording:
