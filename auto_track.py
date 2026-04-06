@@ -31,9 +31,9 @@ logger = logging.getLogger("tello.tracker")
 
 YAW_PID_GAINS = (0.15, 0.0, 0.02)
 ALT_PID_GAINS = (0.15, 0.0, 0.02)
-FB_PID_GAINS  = (0.0006, 0.0, 0.0001)
+FB_PID_GAINS  = (0.0009, 0.0, 0.0001)
 TARGET_AREA   = 45_000   # px²; tuned for close in-flight standoff distance
-MAX_FB_SPEED  = 25       # cap forward/back RC at ±25
+MAX_FB_SPEED  = 45       # cap forward/back RC at ±45 to prevent aggressive oscillations
 
 YAW_DEADZONE  = 15       # px — ignore horizontal jitter below this
 ALT_DEADZONE  = 15       # px — ignore vertical jitter below this
