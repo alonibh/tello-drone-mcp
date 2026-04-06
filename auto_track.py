@@ -104,11 +104,17 @@ class DroneTracker:
     @staticmethod
     def _load_yolo():
         from ultralytics import YOLO
-        return YOLO("yolov8n.pt")
+        # Load base model, export to Intel format, and return the fast version
+        model = YOLO("yolov8n.pt")
+        model.export(format="openvino", imgsz=640)
+        return YOLO("yolov8n_openvino_model/")
 
     def _detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Return list of (x, y, w, h) bounding boxes."""
-        results = self._yolo(frame, verbose=False)[0]
+        
+        # Add imgsz=640 back into this line to keep the math fast!
+        results = self._yolo(frame, verbose=False, imgsz=640)[0] 
+        
         boxes = []
         for r in results.boxes:
             if int(r.cls[0]) != 0:  # filter to person class only
