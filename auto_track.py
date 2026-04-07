@@ -146,19 +146,20 @@ class DroneTracker:
         if self._recording:
             self._stop_recording()
         else:
-            rec_fps = max(fps, 5.0)  # use actual FPS, floor at 5 to avoid broken files
-            self._rec_path = os.path.join(
-                OUTPUT_DIR, f"rec_{datetime.now():%Y%m%d_%H%M%S}.mp4"
-            )
-            # avc1 = H.264 codec, compatible with WhatsApp and mobile devices
+            self._rec_path = os.path.join(OUTPUT_DIR, f"rec_{datetime.now():%Y%m%d_%H%M%S}.mp4")
             fourcc = cv2.VideoWriter_fourcc(*"avc1")
-            self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, rec_fps, (960, 720))
+            
+            # Force exactly 15.0 FPS
+            self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, 15.0, (960, 720))
             if not self._video_writer.isOpened():
                 logger.info("H.264 (avc1) unavailable — falling back to mp4v")
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, rec_fps, (960, 720))
+                self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, 15.0, (960, 720))
+            
             self._recording = True
-            logger.info("Recording started at %.0f FPS: %s", rec_fps, self._rec_path)
+            # Set a baseline timestamp for the frame timing
+            self._next_frame_time = time.time()
+            logger.info("Recording started at an enforced 15 FPS: %s", self._rec_path)
 
     def _stop_recording(self) -> None:
         if self._recording and self._video_writer is not None:
@@ -305,7 +306,12 @@ class DroneTracker:
                 take_screenshot = False
 
             if self._recording and self._video_writer is not None:
-                self._video_writer.write(frame)
+                now = time.time()
+                # If YOLO lags, this loop writes the same frame multiple times to hit 15 FPS.
+                # If YOLO spikes, it skips writing until 66ms have passed.
+                while self._next_frame_time <= now:
+                    self._video_writer.write(frame)
+                    self._next_frame_time += (1.0 / 15.0)
 
         # Stop all RC movement and release resources
         self._stop_recording()
