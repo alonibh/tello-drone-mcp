@@ -27,7 +27,7 @@ from tello_controller import DroneManager, DroneState
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger("tello.tracker")
 
-# ── PID Controller ───────────────────────────────────────────────
+# ── Tracking Constants ───────────────────────────────────────────
 
 YAW_PID_GAINS = (0.15, 0.0, 0.02)
 ALT_PID_GAINS = (0.15, 0.0, 0.02)
@@ -38,6 +38,8 @@ MAX_FB_SPEED  = 45       # cap forward/back RC at ±45 to prevent aggressive osc
 YAW_DEADZONE  = 15       # px — ignore horizontal jitter below this
 ALT_DEADZONE  = 15       # px — ignore vertical jitter below this
 AREA_DEADZONE = 2000     # px² — ignore area jitter below this
+
+EMA_ALPHA     = 0.4      # Smoothing factor for YOLO jitter (0.0 = no new input, 1.0 = raw)
 
 OUTPUT_DIR = "recordings"
 
@@ -98,7 +100,14 @@ class DroneTracker:
         self._video_writer: cv2.VideoWriter | None = None
         self._recording = False
         self._rec_path: str = ""
+        self._next_frame_time = 0.0
         self._last_target_center: tuple[int, int] | None = None
+        
+# Use None to represent an unseeded state
+        self._smooth_x_err: float | None = None
+        self._smooth_y_err: float | None = None
+        self._smooth_area_err: float | None = None
+
         self._yolo = self._load_yolo()
 
     @staticmethod
@@ -111,8 +120,6 @@ class DroneTracker:
 
     def _detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Return list of (x, y, w, h) bounding boxes."""
-        
-        # Add imgsz=640 back into this line to keep the math fast!
         results = self._yolo(frame, verbose=False, imgsz=640)[0] 
         
         boxes = []
@@ -142,14 +149,17 @@ class DroneTracker:
         self._last_target_center = (target[0] + target[2] // 2, target[1] + target[3] // 2)
         return target
 
-    def _toggle_recording(self, fps: float) -> None:
+    def _toggle_recording(self) -> None:
         if self._recording:
             self._stop_recording()
         else:
-            self._rec_path = os.path.join(OUTPUT_DIR, f"rec_{datetime.now():%Y%m%d_%H%M%S}.mp4")
+            self._rec_path = os.path.join(
+                OUTPUT_DIR, f"rec_{datetime.now():%Y%m%d_%H%M%S}.mp4"
+            )
+            # avc1 = H.264 codec, compatible with WhatsApp and mobile devices
             fourcc = cv2.VideoWriter_fourcc(*"avc1")
             
-            # Force exactly 15.0 FPS
+            # Force exactly 15.0 FPS for WhatsApp compatibility
             self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, 15.0, (960, 720))
             if not self._video_writer.isOpened():
                 logger.info("H.264 (avc1) unavailable — falling back to mp4v")
@@ -157,7 +167,6 @@ class DroneTracker:
                 self._video_writer = cv2.VideoWriter(self._rec_path, fourcc, 15.0, (960, 720))
             
             self._recording = True
-            # Set a baseline timestamp for the frame timing
             self._next_frame_time = time.time()
             logger.info("Recording started at an enforced 15 FPS: %s", self._rec_path)
 
@@ -205,7 +214,7 @@ class DroneTracker:
             if key == ord("s"):
                 take_screenshot = True
             if key == ord("r"):
-                self._toggle_recording(fps)
+                self._toggle_recording()
 
             # ── Frame acquisition ────────────────────────────────
             frame = self._drone.get_latest_frame()
@@ -225,7 +234,6 @@ class DroneTracker:
                 continue
 
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            
             last_frame_time = time.time()
 
             # ── Detection & tracking ─────────────────────────────
@@ -246,32 +254,45 @@ class DroneTracker:
                     obj_cx = tx + tw // 2
                     obj_cy = ty + th // 2
 
-                    x_err = obj_cx - cx
-                    y_err = cy - obj_cy
-                    area_err = (tw * th) - TARGET_AREA
+                    raw_x_err = obj_cx - cx
+                    raw_y_err = cy - obj_cy
+                    raw_area_err = (tw * th) - TARGET_AREA
 
-                    # Apply deadzones — suppress PID response to small jitter
-                    if abs(x_err) < YAW_DEADZONE:
-                        x_err = 0
-                    if abs(y_err) < ALT_DEADZONE:
-                        y_err = 0
-                    if abs(area_err) < AREA_DEADZONE:
-                        area_err = 0
+                    # 1. Apply EMA Smoothing (with raw seeding on first frame)
+                    if self._smooth_x_err is None:
+                        self._smooth_x_err = float(raw_x_err)
+                        self._smooth_y_err = float(raw_y_err)
+                        self._smooth_area_err = float(raw_area_err)
+                    else:
+                        self._smooth_x_err = (EMA_ALPHA * raw_x_err) + ((1 - EMA_ALPHA) * self._smooth_x_err)
+                        self._smooth_y_err = (EMA_ALPHA * raw_y_err) + ((1 - EMA_ALPHA) * self._smooth_y_err)
+                        self._smooth_area_err = (EMA_ALPHA * raw_area_err) + ((1 - EMA_ALPHA) * self._smooth_area_err)
 
-                    yaw_cmd = int(self._yaw_pid.compute(x_err))
-                    ud_cmd = int(self._alt_pid.compute(y_err))
-                    fb_cmd = -int(self._fb_pid.compute(area_err))
+                    # 2. Apply deadzones to the SMOOTHED errors
+                    active_x_err = self._smooth_x_err if abs(self._smooth_x_err) >= YAW_DEADZONE else 0.0
+                    active_y_err = self._smooth_y_err if abs(self._smooth_y_err) >= ALT_DEADZONE else 0.0
+                    active_area_err = self._smooth_area_err if abs(self._smooth_area_err) >= AREA_DEADZONE else 0.0
+
+                    # 3. Compute PID commands
+                    yaw_cmd = int(self._yaw_pid.compute(active_x_err))
+                    ud_cmd = int(self._alt_pid.compute(active_y_err))
+                    fb_cmd = -int(self._fb_pid.compute(active_area_err))
 
                     if frame_count == 0:  # log once per second
                         logger.debug(
-                            "x_err=%+4d y_err=%+4d area=%d area_err=%+d → yaw=%+d ud=%+d fb=%+d",
-                            obj_cx - cx, cy - obj_cy, tw * th, (tw * th) - TARGET_AREA,
+                            "RAW x=%+4d y=%+4d | SMOOTH x=%+4d y=%+4d → yaw=%+d ud=%+d fb=%+d",
+                            raw_x_err, raw_y_err, int(self._smooth_x_err), int(self._smooth_y_err),
                             yaw_cmd, ud_cmd, fb_cmd,
                         )
                 else:
                     self._yaw_pid.reset()
                     self._alt_pid.reset()
                     self._fb_pid.reset()
+                    
+                    # Reset to None so the next lock seeds instantly
+                    self._smooth_x_err = None
+                    self._smooth_y_err = None
+                    self._smooth_area_err = None
 
                 self._drone.send_rc(0, fb_cmd, ud_cmd, yaw_cmd)
                 consecutive_errors = 0
@@ -305,10 +326,11 @@ class DroneTracker:
                 logger.info("Screenshot saved: %s", path)
                 take_screenshot = False
 
+            # ── CFR Recording Buffer ─────────────────────────────
             if self._recording and self._video_writer is not None:
                 now = time.time()
-                # If YOLO lags, this loop writes the same frame multiple times to hit 15 FPS.
-                # If YOLO spikes, it skips writing until 66ms have passed.
+                # If YOLO lags, this writes duplicates to hit 15 FPS.
+                # If YOLO spikes, it skips writing until 66.6ms have passed.
                 while self._next_frame_time <= now:
                     self._video_writer.write(frame)
                     self._next_frame_time += (1.0 / 15.0)
