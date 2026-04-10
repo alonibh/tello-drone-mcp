@@ -254,7 +254,7 @@ class DroneTracker:
                     obj_cx = tx + tw // 2
                     obj_cy = ty + th // 2
 
-                    raw_x_err = obj_cx - cx
+                    raw_x_err = cx - obj_cx
                     raw_y_err = cy - obj_cy
                     raw_area_err = (tw * th) - TARGET_AREA
 
