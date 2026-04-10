@@ -103,7 +103,7 @@ class DroneTracker:
         self._next_frame_time = 0.0
         self._last_target_center: tuple[int, int] | None = None
         
-# Use None to represent an unseeded state
+        # Use None to represent an unseeded state
         self._smooth_x_err: float | None = None
         self._smooth_y_err: float | None = None
         self._smooth_area_err: float | None = None
@@ -113,9 +113,13 @@ class DroneTracker:
     @staticmethod
     def _load_yolo():
         from ultralytics import YOLO
-        # Load base model, export to Intel format, and return the fast version
         model = YOLO("yolov8n.pt")
-        model.export(format="openvino", imgsz=640)
+        
+        # Only perform the ~10 second OpenVINO export if it hasn't been done yet
+        if not os.path.exists("yolov8n_openvino_model/"):
+            logger.info("Exporting YOLO to OpenVINO format (this takes a few seconds)...")
+            model.export(format="openvino", imgsz=640)
+            
         return YOLO("yolov8n_openvino_model/")
 
     def _detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
@@ -254,7 +258,7 @@ class DroneTracker:
                     obj_cx = tx + tw // 2
                     obj_cy = ty + th // 2
 
-                    raw_x_err = cx - obj_cx
+                    raw_x_err = obj_cx - cx
                     raw_y_err = cy - obj_cy
                     raw_area_err = (tw * th) - TARGET_AREA
 
