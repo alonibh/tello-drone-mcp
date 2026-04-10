@@ -258,8 +258,13 @@ class DroneTracker:
                     obj_cx = tx + tw // 2
                     obj_cy = ty + th // 2
 
+                    # X-Axis: Object minus Center. (Left object = Negative error = Pan Left)
                     raw_x_err = obj_cx - cx
+                    
+                    # Y-Axis: Center minus Object. (High object [low Y value] = Positive error = Fly Up)
                     raw_y_err = cy - obj_cy
+                    
+                    # Area: Box minus Target. (Small box [far away] = Negative error = Fly Forward)
                     raw_area_err = (tw * th) - TARGET_AREA
 
                     # 1. Apply EMA Smoothing (with raw seeding on first frame)
